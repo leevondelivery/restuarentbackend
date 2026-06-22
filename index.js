@@ -189,7 +189,57 @@ app.get('/accepted-orders/:restaurantId', async (req, res) => {
   }
 });
 
+// Get Incoming Orders Endpoint (from orders collection in MongoDB)
+app.get('/incoming-orders/:restaurantId', async (req, res) => {
+  const { restaurantId } = req.params;
+  try {
+    const orders = await mongoose.connection.db.collection('orders')
+      .find({ restaurantId })
+      .sort({ orderDate: -1 })
+      .toArray();
+    return res.status(200).json({ success: true, orders });
+  } catch (err) {
+    console.error("Fetch incoming orders error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Reject Order Endpoint
+app.post('/reject-order', async (req, res) => {
+  const { orderId } = req.body;
+  if (!orderId) {
+    return res.status(400).json({ success: false, message: "orderId is required" });
+  }
+
+  try {
+    // 1. Find the order in 'orders' collection
+    const order = await mongoose.connection.db.collection('orders').findOne({ orderId });
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found in orders collection" });
+    }
+
+    // 2. Prepare the rejected order document
+    const rejectedOrder = {
+      ...order,
+      status: 'rejected',
+      rejectedAt: new Date()
+    };
+
+    // 3. Insert into 'rejectedorders' collection
+    await mongoose.connection.db.collection('rejectedorders').insertOne(rejectedOrder);
+
+    // 4. Delete from 'orders' collection
+    await mongoose.connection.db.collection('orders').deleteOne({ orderId });
+
+    return res.status(200).json({ success: true, message: "Order rejected and moved to rejectedorders" });
+  } catch (err) {
+    console.error("Reject order error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 // Start Server
 app.listen(PORT, () => {
   console.log(`Backend server running on port ${PORT}`);
 });
+
