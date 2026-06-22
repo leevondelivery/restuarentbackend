@@ -231,6 +231,9 @@ app.post('/reject-order', async (req, res) => {
     // 4. Delete from 'orders' collection
     await mongoose.connection.db.collection('orders').deleteOne({ orderId });
 
+    // 5. Delete from 'orderstatuses' collection
+    await mongoose.connection.db.collection('orderstatuses').deleteOne({ orderId });
+
     return res.status(200).json({ success: true, message: "Order rejected and moved to rejectedorders" });
   } catch (err) {
     console.error("Reject order error:", err);
