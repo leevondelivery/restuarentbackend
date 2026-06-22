@@ -241,8 +241,124 @@ app.post('/reject-order', async (req, res) => {
   }
 });
 
+// Accept Order Endpoint
+app.post('/accept-order', async (req, res) => {
+  const { orderId, rest, restaurantLocation } = req.body;
+  
+  if (!orderId) {
+    return res.status(400).json({ success: false, message: "orderId is required" });
+  }
+
+  try {
+    // Step A: Fetch & Populate Pending Order
+    // Try querying by ObjectId first, fallback to raw string
+    let order = null;
+    try {
+      order = await mongoose.connection.db.collection('orders').findOne({ _id: new mongoose.Types.ObjectId(orderId) });
+    } catch (e) {
+      // Ignored
+    }
+    if (!order) {
+      order = await mongoose.connection.db.collection('orders').findOne({ _id: orderId });
+    }
+    
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found in orders collection" });
+    }
+
+    // Retrieve user details from users collection
+    let user = null;
+    if (order.userId) {
+      try {
+        user = await mongoose.connection.db.collection('users').findOne({ _id: new mongoose.Types.ObjectId(order.userId) });
+      } catch (e) {
+        // Ignored
+      }
+      if (!user) {
+        user = await mongoose.connection.db.collection('users').findOne({ _id: order.userId });
+      }
+    }
+
+    const userDetails = {
+      userName: user ? (user.name || user.userName || "Unknown") : (order.userName || "Unknown"),
+      userEmail: user ? (user.email || "Unknown") : (order.userEmail || "Unknown"),
+      userPhone: user ? (user.phone || user.phoneNumber || "Unknown") : (order.userPhone || "Unknown")
+    };
+
+    // Step B: Prepare Transfer Data
+    // Exclude _id and __v from the original order to prevent duplicate keys on insert
+    const { _id, __v, ...orderData } = order;
+
+    const newEntryData = {
+      ...orderData,
+      userName: userDetails.userName,
+      userEmail: userDetails.userEmail,
+      userPhone: userDetails.userPhone,
+      rest: rest || order.deliveryAddress || "Unknown",
+      restaurantLocation: restaurantLocation || {},
+      status: 'accepted'
+    };
+
+    // Step C: Database Operations (Atomic / Sequential)
+    // 1. Upsert into AcceptedOrder Collection (acceptedorders)
+    await mongoose.connection.db.collection('acceptedorders').updateOne(
+      { orderId: order.orderId },
+      { $set: newEntryData },
+      { upsert: true }
+    );
+
+    // 2. Upsert into AcceptedByRestaurant Collection (acceptedbyrestorents)
+    await mongoose.connection.db.collection('acceptedbyrestorents').updateOne(
+      { orderId: order.orderId },
+      { $set: newEntryData },
+      { upsert: true }
+    );
+
+    // 3. Record / Update Payouts in PendingPayment Collection (pendingpayments)
+    await mongoose.connection.db.collection('pendingpayments').updateOne(
+      { restaurantId: order.restaurantId },
+      { 
+        $inc: { grandTotal: Number(order.totalPrice || 0) },
+        $set: { 
+          restaurantName: order.restaurantName || "Unknown", 
+          date: new Date() 
+        }
+      },
+      { upsert: true }
+    );
+
+    // 4. Delete from Pending Collection (orders)
+    await mongoose.connection.db.collection('orders').deleteOne({ _id: order._id });
+
+    // 5. Update Status Collection (orderstatuses)
+    await mongoose.connection.db.collection('orderstatuses').updateOne(
+      { orderId: order.orderId },
+      { $set: { status: "Waiting for delivery boy to accept" } }
+    );
+
+    // Step D: Trigger Delivery Partner Broadcast (Web Notification) - fire and forget
+    fetch('https://deliverymanmain.vercel.app/api/deliveryboy/broadcast-order', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        title: "New Order Available! 🛵",
+        body: `Order #${order.orderId} is ready for pickup in ${rest || order.deliveryAddress || "Restaurant"}`
+      })
+    }).catch(err => {
+      console.error("Delivery boy broadcast error:", err.message);
+    });
+
+    return res.status(200).json({ success: true, message: "Order accepted successfully" });
+  } catch (err) {
+    console.error("Accept order route error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 // Start Server
 app.listen(PORT, () => {
   console.log(`Backend server running on port ${PORT}`);
 });
-
+ 
