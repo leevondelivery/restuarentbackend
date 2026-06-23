@@ -272,6 +272,21 @@ app.get('/incoming-orders/:restaurantId', async (req, res) => {
   }
 });
 
+// Get Rejected Orders Endpoint (from rejectedorders collection in MongoDB)
+app.get('/rejected-orders/:restaurantId', async (req, res) => {
+  const { restaurantId } = req.params;
+  try {
+    const orders = await mongoose.connection.db.collection('rejectedorders')
+      .find({ restaurantId })
+      .sort({ rejectedAt: -1 })
+      .toArray();
+    return res.status(200).json({ success: true, orders });
+  } catch (err) {
+    console.error("Fetch rejected orders error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 // Reject Order Endpoint
 app.post('/reject-order', async (req, res) => {
   const { orderId } = req.body;
