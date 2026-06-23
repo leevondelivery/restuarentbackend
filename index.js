@@ -174,6 +174,50 @@ app.get('/restaurant-orders/:restaurantId', async (req, res) => {
   }
 });
 
+// Get Restaurant Reviews Endpoint
+app.get('/restaurant-reviews/:restaurantId', async (req, res) => {
+  const { restaurantId } = req.params;
+  try {
+    const reviews = await mongoose.connection.db.collection('orderreviews')
+      .find({ restaurantId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    // Map reviews to populate userName
+    const populatedReviews = await Promise.all(
+      reviews.map(async (review) => {
+        let userName = "Anonymous Customer";
+        if (review.userId) {
+          try {
+            let user = await mongoose.connection.db.collection('users').findOne({ 
+              _id: new mongoose.Types.ObjectId(review.userId) 
+            });
+            if (!user) {
+              user = await mongoose.connection.db.collection('users').findOne({ 
+                _id: review.userId 
+              });
+            }
+            if (user) {
+              userName = user.name || user.userName || "Customer";
+            }
+          } catch (e) {
+            console.error("Error looking up user details:", e);
+          }
+        }
+        return {
+          ...review,
+          userName
+        };
+      })
+    );
+
+    return res.status(200).json({ success: true, reviews: populatedReviews });
+  } catch (err) {
+    console.error("Fetch restaurant reviews error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 // Get Accepted Orders Endpoint (from acceptedorders collection)
 app.get('/accepted-orders/:restaurantId', async (req, res) => {
   const { restaurantId } = req.params;
