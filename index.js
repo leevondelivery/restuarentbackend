@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -9,7 +10,7 @@ app.use(cors());
 app.use(express.json());
 
 // MongoDB Connection
-mongoose.connect('mongodb+srv://omnia771148_db_user:Nk1wTwqHMKCzqti7@cluster0.nbhpjuy.mongodb.net/?appName=Cluster0')
+mongoose.connect(process.env.MONGODB_URI)
   .then(() => {
     console.log("Connected to MongoDB Atlas successfully");
   })
@@ -204,9 +205,32 @@ app.get('/restaurant-reviews/:restaurantId', async (req, res) => {
             console.error("Error looking up user details:", e);
           }
         }
+        // Look up ordered items by orderId
+        let items = [];
+        if (review.orderId) {
+          try {
+            let orderDoc = await mongoose.connection.db.collection('acceptedbyrestorents').findOne({ orderId: review.orderId });
+            if (!orderDoc) {
+              orderDoc = await mongoose.connection.db.collection('finalorders').findOne({ orderId: review.orderId });
+            }
+            if (!orderDoc) {
+              orderDoc = await mongoose.connection.db.collection('finalcompletedorders').findOne({ orderId: review.orderId });
+            }
+            if (!orderDoc) {
+              orderDoc = await mongoose.connection.db.collection('orders').findOne({ orderId: review.orderId });
+            }
+            if (orderDoc && orderDoc.items) {
+              items = orderDoc.items;
+            }
+          } catch (e) {
+            console.error("Error looking up order items for review:", e);
+          }
+        }
+
         return {
           ...review,
-          userName
+          userName,
+          items
         };
       })
     );
