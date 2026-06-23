@@ -106,6 +106,51 @@ app.get('/get-status/:restaurantId', async (req, res) => {
   }
 });
 
+// Get Restaurant Profile Endpoint
+app.get('/restaurant-profile/:restId', async (req, res) => {
+  const { restId } = req.params;
+  try {
+    const user = await User.findOne({ restId }).lean();
+    if (!user) {
+      return res.status(404).json({ success: false, message: "Restaurant user not found" });
+    }
+    // Remove password
+    const { password, ...profileData } = user;
+    return res.status(200).json({ success: true, profile: profileData });
+  } catch (err) {
+    console.error("Fetch restaurant profile error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Update Restaurant Timings Endpoint
+app.post('/update-restaurant-timings', async (req, res) => {
+  const { restId, openTime, closeTime } = req.body;
+  if (!restId) {
+    return res.status(400).json({ success: false, message: "restId is required" });
+  }
+  try {
+    const user = await User.findOneAndUpdate(
+      { restId },
+      { $set: { openTime, closeTime } },
+      { new: true }
+    );
+    if (!user) {
+      return res.status(404).json({ success: false, message: "Restaurant user not found" });
+    }
+    return res.status(200).json({ 
+      success: true, 
+      message: "Timings updated successfully", 
+      openTime: user.openTime, 
+      closeTime: user.closeTime 
+    });
+  } catch (err) {
+    console.error("Update restaurant timings error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+
 // Restaurant Stats Endpoint (calculates earnings and order counts from acceptedbyrestorents)
 app.get('/restaurant-stats/:restaurantId', async (req, res) => {
   const { restaurantId } = req.params;
