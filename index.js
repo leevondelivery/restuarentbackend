@@ -106,6 +106,57 @@ app.get('/get-status/:restaurantId', async (req, res) => {
   }
 });
 
+// Get all items in itemstatus for a restaurant
+app.get('/itemstatus/:restaurantId', async (req, res) => {
+  const { restaurantId } = req.params;
+  try {
+    const items = await mongoose.connection.db.collection('itemstatus')
+      .find({ restaurantId })
+      .toArray();
+    return res.status(200).json({ success: true, items });
+  } catch (err) {
+    console.error("Fetch itemstatus error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Toggle the status of a specific item
+app.post('/toggle-itemstatus', async (req, res) => {
+  const { itemId, itemStatus } = req.body;
+  if (!itemId || itemStatus === undefined) {
+    return res.status(400).json({ success: false, message: "itemId and itemStatus are required" });
+  }
+  try {
+    let objectId;
+    try {
+      objectId = new mongoose.Types.ObjectId(itemId);
+    } catch (e) {
+      objectId = itemId;
+    }
+
+    const result = await mongoose.connection.db.collection('itemstatus').updateOne(
+      { _id: objectId },
+      { $set: { itemStatus, updatedAt: new Date() } }
+    );
+
+    if (result.matchedCount === 0) {
+      // Try matching by raw string id
+      const resultRaw = await mongoose.connection.db.collection('itemstatus').updateOne(
+        { _id: itemId },
+        { $set: { itemStatus, updatedAt: new Date() } }
+      );
+      if (resultRaw.matchedCount === 0) {
+        return res.status(404).json({ success: false, message: "Item not found" });
+      }
+    }
+
+    return res.status(200).json({ success: true, message: "Item status updated successfully" });
+  } catch (err) {
+    console.error("Toggle itemstatus error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 // Get Restaurant Profile Endpoint
 app.get('/restaurant-profile/:restId', async (req, res) => {
   const { restId } = req.params;
