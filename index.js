@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const admin = require('firebase-admin');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,10 +10,50 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Initialize Firebase Admin dynamically
+try {
+  let serviceAccount;
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    console.log("Firebase Admin SDK initialized successfully via FIREBASE_SERVICE_ACCOUNT");
+  } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+    const privateKey = process.env.FIREBASE_PRIVATE_KEY
+      .replace(/^"|"$/g, '')
+      .replace(/\\n/g, '\n');
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        projectId: process.env.FIREBASE_PROJECT_ID,
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        privateKey: privateKey,
+      })
+    });
+    console.log("Firebase Admin SDK initialized successfully via individual environment variables");
+  } else {
+    const fs = require('fs');
+    const path = require('path');
+    const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
+    if (fs.existsSync(serviceAccountPath)) {
+      serviceAccount = require(serviceAccountPath);
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+      });
+      console.log("Firebase Admin SDK initialized successfully via serviceAccountKey.json");
+    } else {
+      console.warn("Firebase credentials not found. Push notifications will not function in production.");
+    }
+  }
+} catch (error) {
+  console.error("Error initializing Firebase Admin SDK:", error);
+}
+
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => {
     console.log("Connected to MongoDB Atlas successfully");
+    startOrderListener();
   })
   .catch(err => console.error("MongoDB connection error:", err));
 
@@ -61,6 +102,39 @@ app.post('/login', async (req, res) => {
   } catch (err) {
     console.error("Login route error:", err);
     return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Update FCM Token Endpoint (registers fcmToken on login, clears/deletes fcmToken on logout)
+app.post('/update-fcm', async (req, res) => {
+  const { restId, fcmToken } = req.body;
+
+  if (!restId) {
+    return res.status(400).json({ success: false, message: "restId is required" });
+  }
+
+  try {
+    // If fcmToken is null, undefined, or empty string, it clears/deletes the token in the DB
+    const tokenValue = fcmToken || "";
+    const result = await User.findOneAndUpdate(
+      { restId: restId },
+      { $set: { fcmToken: tokenValue } },
+      { new: true }
+    );
+
+    if (!result) {
+      return res.status(404).json({ success: false, message: "Restaurant user not found" });
+    }
+
+    console.log(`FCM token successfully ${tokenValue ? 'registered' : 'cleared'} for Restaurant: ${restId}`);
+    return res.status(200).json({ 
+      success: true, 
+      message: `FCM token successfully ${tokenValue ? 'registered' : 'cleared'}`,
+      data: { restId: result.restId, hasToken: !!result.fcmToken }
+    });
+  } catch (err) {
+    console.error("Error updating FCM token:", err);
+    return res.status(500).json({ success: false, message: "Internal server error", error: err.message });
   }
 });
 
@@ -535,6 +609,73 @@ app.post('/accept-order', async (req, res) => {
     return res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
+
+// Order Stream Listener to automatically trigger push notifications
+function startOrderListener() {
+  const db = mongoose.connection.db;
+  const orderCollection = db.collection('orders');
+
+  console.log("Setting up MongoDB Order watch change stream...");
+
+  let changeStream;
+  try {
+    changeStream = orderCollection.watch([
+      { $match: { operationType: 'insert' } }
+    ]);
+
+    changeStream.on('change', async (change) => {
+      const newOrder = change.fullDocument;
+      console.log("🔥 NEW ORDER DETECTED:", newOrder.orderId || newOrder._id);
+
+      const targetRestaurantId = newOrder.restaurantId;
+      if (targetRestaurantId) {
+        // Find the restaurant in 'restuarentusers' to get its fcmToken
+        const restaurant = await User.findOne({ restId: targetRestaurantId });
+        if (restaurant && restaurant.fcmToken) {
+          console.log(`Found Restaurant: ${restaurant.email} (ID: ${targetRestaurantId}), dispatching notification...`);
+          await sendPushNotification(restaurant.fcmToken, newOrder);
+        } else {
+          console.log(`No registered fcmToken found for Restaurant ID: ${targetRestaurantId}`);
+        }
+      }
+    });
+
+    changeStream.on('error', (err) => {
+      console.error("Order change stream listener error:", err.message || err);
+    });
+  } catch (error) {
+    console.error("Failed to start MongoDB change stream watch:", error.message || error);
+  }
+}
+
+// Helper function to send Firebase notification
+async function sendPushNotification(fcmToken, order) {
+  const message = {
+    token: fcmToken,
+    notification: {
+      title: 'New Order Received! 🍔',
+      body: `Order #${order.orderId || String(order._id).slice(-4)} has been placed for ₹${order.totalPrice || order.grandTotal || 0}.`,
+    },
+    data: {
+      orderId: String(order._id),
+      action: 'open_order'
+    },
+    android: {
+      priority: 'high',
+      notification: {
+        channelId: 'default',
+        sound: 'default'
+      }
+    }
+  };
+
+  try {
+    const response = await admin.messaging().send(message);
+    console.log('Firebase notification successfully dispatched:', response);
+  } catch (error) {
+    console.error('Error dispatching Firebase notification:', error);
+  }
+}
 
 // Start Server
 app.listen(PORT, () => {
