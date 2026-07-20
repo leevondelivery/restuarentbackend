@@ -105,6 +105,50 @@ app.post('/login', async (req, res) => {
   }
 });
 
+// Signup Endpoint
+app.post('/signup', async (req, res) => {
+  const { email, password, restId } = req.body;
+
+  if (!email || !password || !restId) {
+    return res.status(400).json({ success: false, message: "Email, password, and restId are required" });
+  }
+
+  try {
+    // Check if user already exists with this email
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ success: false, message: "User already exists with this email" });
+    }
+
+    // Check if restId is already taken
+    const existingRest = await User.findOne({ restId });
+    if (existingRest) {
+      return res.status(400).json({ success: false, message: "Restaurant ID is already registered" });
+    }
+
+    // Create new user
+    const newUser = new User({
+      email,
+      password,
+      restId
+    });
+
+    await newUser.save();
+
+    // Exclude password from the returned user details
+    const { password: _, ...userData } = newUser.toObject();
+
+    return res.status(201).json({
+      success: true,
+      message: "Signup successful",
+      user: userData
+    });
+  } catch (err) {
+    console.error("Signup route error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 // Update FCM Token Endpoint (registers fcmToken on login, clears/deletes fcmToken on logout)
 app.post('/update-fcm', async (req, res) => {
   const { restId, fcmToken } = req.body;
