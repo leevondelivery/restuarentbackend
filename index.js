@@ -183,6 +183,7 @@ app.post('/update-fcm', async (req, res) => {
 });
 
 // Toggle Status Endpoint
+// Updates isActive directly on the restaurant user document in restuarentusers collection
 app.post('/toggle-status', async (req, res) => {
   const { restaurantId, isActive } = req.body;
 
@@ -191,17 +192,27 @@ app.post('/toggle-status', async (req, res) => {
   }
 
   try {
-    const status = await RestaurantStatus.findOneAndUpdate(
-      { restaurantId },
+    const updatedUser = await User.findOneAndUpdate(
+      { restId: restaurantId },
       { 
-        isActive, 
-        isManuallyToggled: true,
-        manualStatusUpdatedAt: new Date()
+        $set: { 
+          isActive: isActive,
+          statusUpdatedAt: new Date()
+        } 
       },
-      { new: true, upsert: true }
+      { new: true }
     );
 
-    return res.status(200).json({ success: true, message: "Status updated successfully", status });
+    if (!updatedUser) {
+      return res.status(404).json({ success: false, message: "Restaurant user not found" });
+    }
+
+    console.log(`Restaurant ${restaurantId} isActive set to ${isActive} in restuarentusers`);
+    return res.status(200).json({ 
+      success: true, 
+      message: "Status updated successfully", 
+      isActive: updatedUser.isActive 
+    });
   } catch (err) {
     console.error("Toggle status error:", err);
     return res.status(500).json({ success: false, message: "Internal server error" });
@@ -209,15 +220,18 @@ app.post('/toggle-status', async (req, res) => {
 });
 
 // Get Status Endpoint
+// Reads isActive directly from the restaurant user document in restuarentusers collection
 app.get('/get-status/:restaurantId', async (req, res) => {
   const { restaurantId } = req.params;
 
   try {
-    const status = await RestaurantStatus.findOne({ restaurantId });
-    if (!status) {
+    const user = await User.findOne({ restId: restaurantId }).lean();
+    if (!user) {
       return res.status(200).json({ success: true, isActive: false });
     }
-    return res.status(200).json({ success: true, isActive: status.isActive });
+    // Default to true (open) if isActive has never been set on this user document
+    const isActive = user.isActive !== undefined ? user.isActive : true;
+    return res.status(200).json({ success: true, isActive });
   } catch (err) {
     console.error("Get status error:", err);
     return res.status(500).json({ success: false, message: "Internal server error" });
