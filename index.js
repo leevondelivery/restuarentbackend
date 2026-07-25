@@ -238,46 +238,58 @@ app.get('/get-status/:restaurantId', async (req, res) => {
   }
 });
 
-// Get all items in itemstatus / restaurant collection for a restaurant
+// Get all items in itemstatus / restaurant collections for a restaurant
 app.get('/itemstatus/:restaurantId', async (req, res) => {
   const { restaurantId } = req.params;
+  const targetId = String(restaurantId);
+
   try {
-    const db = mongoose.connection.db;
+    const client = mongoose.connection.client;
     let items = [];
 
-    // 1. Try finding in 'itemstatus' collection by restaurantId or restId
-    items = await db.collection('itemstatus')
-      .find({ $or: [{ restaurantId }, { restId: restaurantId }] })
-      .project({ photo: 0, image: 0, img: 0, imageUrl: 0 })
-      .toArray();
-
-    // 2. If no items found in 'itemstatus', check if a separate collection named after restaurantId exists!
-    if (!items || items.length === 0) {
-      const collections = await db.listCollections({ name: restaurantId }).toArray();
-      if (collections.length > 0) {
-        items = await db.collection(restaurantId)
-          .find({})
-          .project({ photo: 0, image: 0, img: 0, imageUrl: 0 })
-          .toArray();
+    // 1. Search in 'test' database -> 'itemstatus' collection
+    try {
+      const testDb = client.db('test');
+      const testItems = await testDb.collection('itemstatus')
+        .find({ $or: [{ restaurantId: targetId }, { restId: targetId }] })
+        .project({ photoUrl: 0, photo: 0, image: 0, img: 0, imageUrl: 0 })
+        .toArray();
+      if (testItems && testItems.length > 0) {
+        items = items.concat(testItems);
       }
+    } catch (e) {
+      console.error("Error querying test.itemstatus:", e.message);
     }
 
-    // 3. If still empty, lookup restaurant user to check alternative collection names (e.g. user.email or user.restId)
-    if (!items || items.length === 0) {
-      const user = await User.findOne({ $or: [{ restId: restaurantId }, { _id: restaurantId }] }).lean();
-      if (user) {
-        const potentialColls = [user.restId, user.email].filter(Boolean);
-        for (const collName of potentialColls) {
-          const exists = await db.listCollections({ name: collName }).toArray();
-          if (exists.length > 0) {
-            items = await db.collection(collName)
-              .find({})
-              .project({ photo: 0, image: 0, img: 0, imageUrl: 0 })
-              .toArray();
-            if (items && items.length > 0) break;
-          }
+    // 2. Search in 'restuarents' database across all collections
+    try {
+      const restDb = client.db('restuarents');
+      const collections = await restDb.listCollections().toArray();
+      for (const coll of collections) {
+        const collItems = await restDb.collection(coll.name)
+          .find({ $or: [{ restaurantId: targetId }, { restId: targetId }] })
+          .project({ photoUrl: 0, photo: 0, image: 0, img: 0, imageUrl: 0 })
+          .toArray();
+        if (collItems && collItems.length > 0) {
+          items = items.concat(collItems);
         }
       }
+    } catch (e) {
+      console.error("Error querying restuarents db collections:", e.message);
+    }
+
+    // 3. Fallback search in default database
+    if (items.length === 0) {
+      try {
+        const defaultDb = mongoose.connection.db;
+        const defaultItems = await defaultDb.collection('itemstatus')
+          .find({ $or: [{ restaurantId: targetId }, { restId: targetId }] })
+          .project({ photoUrl: 0, photo: 0, image: 0, img: 0, imageUrl: 0 })
+          .toArray();
+        if (defaultItems && defaultItems.length > 0) {
+          items = items.concat(defaultItems);
+        }
+      } catch (e) {}
     }
 
     // Standardize returned items (excluding photos, retrieving itemName, price, itemStatus)
@@ -295,14 +307,14 @@ app.get('/itemstatus/:restaurantId', async (req, res) => {
   }
 });
 
-// Toggle the status of a specific item across collections
+// Toggle the status of a specific item across databases & collections
 app.post('/toggle-itemstatus', async (req, res) => {
   const { itemId, itemStatus, restId } = req.body;
   if (!itemId || itemStatus === undefined) {
     return res.status(400).json({ success: false, message: "itemId and itemStatus are required" });
   }
   try {
-    const db = mongoose.connection.db;
+    const client = mongoose.connection.client;
     let objectId;
     try {
       objectId = new mongoose.Types.ObjectId(itemId);
@@ -310,24 +322,32 @@ app.post('/toggle-itemstatus', async (req, res) => {
       objectId = itemId;
     }
 
-    // Try updating in 'itemstatus' collection first
-    let result = await db.collection('itemstatus').updateOne(
-      { $or: [{ _id: objectId }, { _id: itemId }] },
-      { $set: { itemStatus, updatedAt: new Date() } }
-    );
+    let updated = false;
 
-    // If not matched in 'itemstatus', try updating in restaurant's specific collection if provided
-    if (result.matchedCount === 0 && restId) {
-      const exists = await db.listCollections({ name: restId }).toArray();
-      if (exists.length > 0) {
-        result = await db.collection(restId).updateOne(
-          { $or: [{ _id: objectId }, { _id: itemId }] },
+    // 1. Try updating in 'test' db -> 'itemstatus' collection
+    try {
+      const testDb = client.db('test');
+      const resTest = await testDb.collection('itemstatus').updateOne(
+        { $or: [{ _id: objectId }, { _id: itemId }, { itemId: itemId }] },
+        { $set: { itemStatus, updatedAt: new Date() } }
+      );
+      if (resTest.matchedCount > 0) updated = true;
+    } catch (e) {}
+
+    // 2. Try updating in 'restuarents' db collections
+    try {
+      const restDb = client.db('restuarents');
+      const collections = await restDb.listCollections().toArray();
+      for (const coll of collections) {
+        const resRest = await restDb.collection(coll.name).updateOne(
+          { $or: [{ _id: objectId }, { _id: itemId }, { itemId: itemId }] },
           { $set: { itemStatus, updatedAt: new Date() } }
         );
+        if (resRest.matchedCount > 0) updated = true;
       }
-    }
+    } catch (e) {}
 
-    return res.status(200).json({ success: true, message: "Item status updated successfully" });
+    return res.status(200).json({ success: true, message: "Item status updated successfully", updated });
   } catch (err) {
     console.error("Toggle itemstatus error:", err);
     return res.status(500).json({ success: false, message: "Internal server error" });
