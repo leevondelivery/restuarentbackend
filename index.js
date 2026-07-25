@@ -847,7 +847,7 @@ app.post('/accept-order', async (req, res) => {
       { upsert: true }
     );
 
-    // 4. Delete from Pending Collection (orders)
+   
     await mongoose.connection.db.collection('orders').deleteOne({ _id: order._id });
 
     // 5. Update Status Collection (orderstatuses)
@@ -948,4 +948,3 @@ async function sendPushNotification(fcmToken, order) {
 app.listen(PORT, () => {
   console.log(`Backend server running on port ${PORT}`);
 });
- 
