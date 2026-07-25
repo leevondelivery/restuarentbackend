@@ -420,8 +420,12 @@ app.get('/restaurant-stats/:restaurantId', async (req, res) => {
 
     orders.forEach(order => {
       totalOrders++;
-      // Price is totalPrice minus 12% commission
-      const price = Number(order.totalPrice || 0) * 0.88;
+      const commRate = (order.commissionRate !== undefined && order.commissionRate !== null)
+        ? Number(order.commissionRate)
+        : 12;
+      const price = (order.netEarnings !== undefined && order.netEarnings !== null)
+        ? Number(order.netEarnings)
+        : Number(order.totalPrice || 0) * (1 - commRate / 100);
       totalEarnings += price;
 
       if (order.orderDate) {
@@ -617,6 +621,97 @@ app.post('/reject-order', async (req, res) => {
   }
 });
 
+// Restaurant Stats Endpoint (calculates earnings and order counts from acceptedbyrestorents)
+app.get('/restaurant-stats/:restaurantId', async (req, res) => {
+  const { restaurantId } = req.params;
+
+  try {
+    const orders = await mongoose.connection.db.collection('acceptedbyrestorents')
+      .find({ restaurantId })
+      .toArray();
+
+    // Fetch restaurant user commission from DB
+    let defaultRestComm = 12;
+    try {
+      const testDb = mongoose.connection.client.db("test");
+      const rUser = await testDb.collection('restuarentusers').findOne({
+        $or: [
+          { restId: String(restaurantId) },
+          { restId: Number(restaurantId) },
+          { restaurantId: String(restaurantId) },
+          { restaurantId: Number(restaurantId) }
+        ]
+      });
+      if (rUser && rUser.commission !== undefined && rUser.commission !== null) {
+        defaultRestComm = Number(rUser.commission);
+      }
+    } catch (e) {
+      // Ignored
+    }
+
+    let totalEarnings = 0;
+    let totalOrders = 0;
+    let todayEarnings = 0;
+    let todayOrders = 0;
+
+    const today = new Date();
+    const todayYear = today.getFullYear();
+    const todayMonth = today.getMonth();
+    const todayDate = today.getDate();
+
+    orders.forEach(order => {
+      totalOrders++;
+      const commRate = (order.commissionRate !== undefined && order.commissionRate !== null)
+        ? Number(order.commissionRate)
+        : defaultRestComm;
+      const price = (order.netEarnings !== undefined && order.netEarnings !== null)
+        ? Number(order.netEarnings)
+        : Number(order.totalPrice || 0) * (1 - commRate / 100);
+      totalEarnings += price;
+
+      if (order.orderDate) {
+        const oDate = new Date(order.orderDate);
+        if (
+          oDate.getFullYear() === todayYear &&
+          oDate.getMonth() === todayMonth &&
+          oDate.getDate() === todayDate
+        ) {
+          todayOrders++;
+          todayEarnings += price;
+        }
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      stats: {
+        todayEarnings: parseFloat(todayEarnings.toFixed(2)),
+        todayOrders,
+        totalEarnings: parseFloat(totalEarnings.toFixed(2)),
+        totalOrders
+      }
+    });
+  } catch (err) {
+    console.error("Fetch restaurant stats error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Get Restaurant Orders Endpoint
+app.get('/restaurant-orders/:restaurantId', async (req, res) => {
+  const { restaurantId } = req.params;
+  try {
+    const orders = await mongoose.connection.db.collection('acceptedbyrestorents')
+      .find({ restaurantId })
+      .sort({ orderDate: -1 })
+      .toArray();
+    return res.status(200).json({ success: true, orders });
+  } catch (err) {
+    console.error("Fetch restaurant orders error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 // Accept Order Endpoint
 app.post('/accept-order', async (req, res) => {
   const { orderId, rest, restaurantLocation } = req.body;
@@ -661,7 +756,47 @@ app.post('/accept-order', async (req, res) => {
       userPhone: user ? (user.phone || user.phoneNumber || "Unknown") : (order.userPhone || "Unknown")
     };
 
-    // Step B: Prepare Transfer Data
+    // Step B: Fetch Restaurant User Commission from DB & Calculate Payout
+    let restUser = null;
+    if (order.restaurantId) {
+      try {
+        const testDb = mongoose.connection.client.db("test");
+        restUser = await testDb.collection('restuarentusers').findOne({
+          $or: [
+            { restId: String(order.restaurantId) },
+            { restId: Number(order.restaurantId) },
+            { restaurantId: String(order.restaurantId) },
+            { restaurantId: Number(order.restaurantId) },
+            { _id: String(order.restaurantId) }
+          ]
+        });
+      } catch (e) {
+        // Ignored
+      }
+      if (!restUser) {
+        try {
+          restUser = await mongoose.connection.db.collection('restuarentusers').findOne({
+            $or: [
+              { restId: String(order.restaurantId) },
+              { restId: Number(order.restaurantId) },
+              { restaurantId: String(order.restaurantId) },
+              { restaurantId: Number(order.restaurantId) }
+            ]
+          });
+        } catch (e) {
+          // Ignored
+        }
+      }
+    }
+
+    const commissionRate = (restUser && restUser.commission !== undefined && restUser.commission !== null)
+      ? Number(restUser.commission)
+      : 12; // default 12% commission
+
+    const rawTotalPrice = Number(order.totalPrice || 0);
+    const commissionAmount = Number((rawTotalPrice * (commissionRate / 100)).toFixed(2));
+    const netEarnings = Number((rawTotalPrice - commissionAmount).toFixed(2));
+
     // Exclude _id and __v from the original order to prevent duplicate keys on insert
     const { _id, __v, ...orderData } = order;
 
@@ -672,7 +807,11 @@ app.post('/accept-order', async (req, res) => {
       userPhone: userDetails.userPhone,
       rest: rest || order.deliveryAddress || "Unknown",
       restaurantLocation: restaurantLocation || {},
-      status: 'accepted'
+      status: 'accepted',
+      commissionRate: commissionRate,
+      commissionAmount: commissionAmount,
+      netEarnings: netEarnings,
+      totalPriceAfterCommission: netEarnings
     };
 
     // Step C: Database Operations (Atomic / Sequential)
@@ -690,13 +829,18 @@ app.post('/accept-order', async (req, res) => {
       { upsert: true }
     );
 
-    // 3. Record / Update Payouts in PendingPayment Collection (pendingpayments)
+    // 3. Record / Update Payouts in PendingPayment Collection (pendingpayments) using net earnings after commission cut
     await mongoose.connection.db.collection('pendingpayments').updateOne(
-      { restaurantId: order.restaurantId },
+      { restaurantId: String(order.restaurantId) },
       { 
-        $inc: { grandTotal: Number(order.totalPrice || 0) },
+        $inc: { 
+          grandTotal: netEarnings,
+          grossTotal: rawTotalPrice,
+          totalCommissionCut: commissionAmount
+        },
         $set: { 
           restaurantName: order.restaurantName || "Unknown", 
+          commissionRate: commissionRate,
           date: new Date() 
         }
       },
