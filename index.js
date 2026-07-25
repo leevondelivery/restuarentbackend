@@ -238,27 +238,71 @@ app.get('/get-status/:restaurantId', async (req, res) => {
   }
 });
 
-// Get all items in itemstatus for a restaurant
+// Get all items in itemstatus / restaurant collection for a restaurant
 app.get('/itemstatus/:restaurantId', async (req, res) => {
   const { restaurantId } = req.params;
   try {
-    const items = await mongoose.connection.db.collection('itemstatus')
-      .find({ restaurantId })
+    const db = mongoose.connection.db;
+    let items = [];
+
+    // 1. Try finding in 'itemstatus' collection by restaurantId or restId
+    items = await db.collection('itemstatus')
+      .find({ $or: [{ restaurantId }, { restId: restaurantId }] })
+      .project({ photo: 0, image: 0, img: 0, imageUrl: 0 })
       .toArray();
-    return res.status(200).json({ success: true, items });
+
+    // 2. If no items found in 'itemstatus', check if a separate collection named after restaurantId exists!
+    if (!items || items.length === 0) {
+      const collections = await db.listCollections({ name: restaurantId }).toArray();
+      if (collections.length > 0) {
+        items = await db.collection(restaurantId)
+          .find({})
+          .project({ photo: 0, image: 0, img: 0, imageUrl: 0 })
+          .toArray();
+      }
+    }
+
+    // 3. If still empty, lookup restaurant user to check alternative collection names (e.g. user.email or user.restId)
+    if (!items || items.length === 0) {
+      const user = await User.findOne({ $or: [{ restId: restaurantId }, { _id: restaurantId }] }).lean();
+      if (user) {
+        const potentialColls = [user.restId, user.email].filter(Boolean);
+        for (const collName of potentialColls) {
+          const exists = await db.listCollections({ name: collName }).toArray();
+          if (exists.length > 0) {
+            items = await db.collection(collName)
+              .find({})
+              .project({ photo: 0, image: 0, img: 0, imageUrl: 0 })
+              .toArray();
+            if (items && items.length > 0) break;
+          }
+        }
+      }
+    }
+
+    // Standardize returned items (excluding photos, retrieving itemName, price, itemStatus)
+    const formattedItems = (items || []).map(item => ({
+      ...item,
+      itemName: item.itemName || item.name || item.title || "Unnamed Item",
+      price: item.price !== undefined ? item.price : (item.itemPrice || 0),
+      itemStatus: item.itemStatus !== undefined ? Boolean(item.itemStatus) : (item.isAvailable !== undefined ? Boolean(item.isAvailable) : true)
+    }));
+
+    return res.status(200).json({ success: true, items: formattedItems });
   } catch (err) {
     console.error("Fetch itemstatus error:", err);
     return res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
-// Toggle the status of a specific item
+// Toggle the status of a specific item across collections
 app.post('/toggle-itemstatus', async (req, res) => {
-  const { itemId, itemStatus } = req.body;
+  const { itemId, itemStatus, restId } = req.body;
   if (!itemId || itemStatus === undefined) {
     return res.status(400).json({ success: false, message: "itemId and itemStatus are required" });
   }
   try {
+    const db = mongoose.connection.db;
     let objectId;
     try {
       objectId = new mongoose.Types.ObjectId(itemId);
@@ -266,19 +310,20 @@ app.post('/toggle-itemstatus', async (req, res) => {
       objectId = itemId;
     }
 
-    const result = await mongoose.connection.db.collection('itemstatus').updateOne(
-      { _id: objectId },
+    // Try updating in 'itemstatus' collection first
+    let result = await db.collection('itemstatus').updateOne(
+      { $or: [{ _id: objectId }, { _id: itemId }] },
       { $set: { itemStatus, updatedAt: new Date() } }
     );
 
-    if (result.matchedCount === 0) {
-      // Try matching by raw string id
-      const resultRaw = await mongoose.connection.db.collection('itemstatus').updateOne(
-        { _id: itemId },
-        { $set: { itemStatus, updatedAt: new Date() } }
-      );
-      if (resultRaw.matchedCount === 0) {
-        return res.status(404).json({ success: false, message: "Item not found" });
+    // If not matched in 'itemstatus', try updating in restaurant's specific collection if provided
+    if (result.matchedCount === 0 && restId) {
+      const exists = await db.listCollections({ name: restId }).toArray();
+      if (exists.length > 0) {
+        result = await db.collection(restId).updateOne(
+          { $or: [{ _id: objectId }, { _id: itemId }] },
+          { $set: { itemStatus, updatedAt: new Date() } }
+        );
       }
     }
 
