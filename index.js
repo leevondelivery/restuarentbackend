@@ -2,7 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const admin = require('firebase-admin');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getMessaging } = require('firebase-admin/messaging');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,16 +16,16 @@ try {
   let serviceAccount;
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
+    initializeApp({
+      credential: cert(serviceAccount)
     });
     console.log("Firebase Admin SDK initialized successfully via FIREBASE_SERVICE_ACCOUNT");
   } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
     const privateKey = process.env.FIREBASE_PRIVATE_KEY
       .replace(/^"|"$/g, '')
       .replace(/\\n/g, '\n');
-    admin.initializeApp({
-      credential: admin.credential.cert({
+    initializeApp({
+      credential: cert({
         projectId: process.env.FIREBASE_PROJECT_ID,
         clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
         privateKey: privateKey,
@@ -36,9 +37,9 @@ try {
     const path = require('path');
     const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
     if (fs.existsSync(serviceAccountPath)) {
-      serviceAccount = require(serviceAccountPath);
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount)
+      serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
+      initializeApp({
+        credential: cert(serviceAccount)
       });
       console.log("Firebase Admin SDK initialized successfully via serviceAccountKey.json");
     } else {
@@ -163,7 +164,7 @@ app.post('/update-fcm', async (req, res) => {
     const result = await User.findOneAndUpdate(
       { restId: restId },
       { $set: { fcmToken: tokenValue } },
-      { new: true }
+      { returnDocument: 'after' }
     );
 
     if (!result) {
@@ -200,7 +201,7 @@ app.post('/toggle-status', async (req, res) => {
           statusUpdatedAt: new Date()
         } 
       },
-      { new: true }
+      { returnDocument: 'after' }
     );
 
     if (!updatedUser) {
@@ -381,7 +382,7 @@ app.post('/update-restaurant-timings', async (req, res) => {
     const user = await User.findOneAndUpdate(
       { restId },
       { $set: { openTime, closeTime } },
-      { new: true }
+      { returnDocument: 'after' }
     );
     if (!user) {
       return res.status(404).json({ success: false, message: "Restaurant user not found" });
@@ -937,7 +938,7 @@ async function sendPushNotification(fcmToken, order) {
   };
 
   try {
-    const response = await admin.messaging().send(message);
+    const response = await getMessaging().send(message);
     console.log('Firebase notification successfully dispatched:', response);
   } catch (error) {
     console.error('Error dispatching Firebase notification:', error);
