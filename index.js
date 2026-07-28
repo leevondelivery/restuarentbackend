@@ -1012,8 +1012,10 @@ async function sendPushNotification(fcmToken, order) {
     android: {
       priority: 'high',
       notification: {
-        channelId: 'default',
-        sound: 'default'
+        channelId: 'order_notifications',
+        sound: 'default',
+        priority: 'max',
+        visibility: 'public'
       }
     }
   };
