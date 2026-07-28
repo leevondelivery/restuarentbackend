@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const crypto = require('crypto');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getMessaging } = require('firebase-admin/messaging');
 
@@ -10,6 +11,28 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+
+// Session Check Middleware to enforce single device login
+const checkSession = async (req, res, next) => {
+  const sessionId = req.headers['x-session-id'] || req.body.sessionId || req.query.sessionId;
+  const restId = req.headers['x-rest-id'] || req.body.restId || req.body.restaurantId || req.params.restaurantId;
+
+  if (sessionId && restId) {
+    try {
+      const user = await User.findOne({ restId }).lean();
+      if (user && user.currentSessionId && user.currentSessionId !== sessionId) {
+        return res.status(401).json({ 
+          success: false, 
+          code: "SESSION_EXPIRED", 
+          message: "Logged in on another device" 
+        });
+      }
+    } catch (err) {
+      console.error("Session middleware error:", err.message);
+    }
+  }
+  next();
+};
 
 // Initialize Firebase Admin dynamically
 try {
@@ -92,12 +115,22 @@ app.post('/login', async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid password" });
     }
 
+    // Generate new Session ID for single-device session enforcement
+    const sessionId = crypto.randomUUID();
+    const updatedUser = await User.findOneAndUpdate(
+      { email },
+      { $set: { currentSessionId: sessionId } },
+      { returnDocument: 'after' }
+    ).lean();
+
     // Exclude password from the returned user details
-    const { password: _, ...userData } = user;
+    const { password: _, ...userData } = updatedUser || user;
+    userData.sessionId = sessionId;
 
     return res.status(200).json({ 
       success: true, 
       message: "Login successful",
+      sessionId: sessionId,
       user: userData
     });
   } catch (err) {
@@ -159,8 +192,31 @@ app.post('/update-fcm', async (req, res) => {
   }
 
   try {
-    // If fcmToken is null, undefined, or empty string, it clears/deletes the token in the DB
     const tokenValue = fcmToken || "";
+
+    // Check if an old FCM token exists for a different device before updating
+    const existingUser = await User.findOne({ restId: restId }).lean();
+    if (existingUser && existingUser.fcmToken && tokenValue && existingUser.fcmToken !== tokenValue) {
+      console.log(`Sending silent FORCE_LOGOUT notification to previous device FCM token for Restaurant: ${restId}`);
+      try {
+        const logoutPayload = {
+          token: existingUser.fcmToken,
+          data: {
+            action: 'FORCE_LOGOUT',
+            message: 'Your account was logged in from another device.'
+          },
+          android: {
+            priority: 'high'
+          }
+        };
+        await getMessaging().send(logoutPayload);
+        console.log("Silent FORCE_LOGOUT notification dispatched successfully.");
+      } catch (fcmErr) {
+        console.error("Error dispatching silent FORCE_LOGOUT notification:", fcmErr.message);
+      }
+    }
+
+    // If fcmToken is null, undefined, or empty string, it clears/deletes the token in the DB
     const result = await User.findOneAndUpdate(
       { restId: restId },
       { $set: { fcmToken: tokenValue } },
@@ -180,6 +236,31 @@ app.post('/update-fcm', async (req, res) => {
   } catch (err) {
     console.error("Error updating FCM token:", err);
     return res.status(500).json({ success: false, message: "Internal server error", error: err.message });
+  }
+});
+
+// Verify Session Endpoint
+app.post('/verify-session', async (req, res) => {
+  const { restId, sessionId } = req.body;
+  if (!restId || !sessionId) {
+    return res.status(400).json({ success: false, message: "restId and sessionId are required" });
+  }
+  try {
+    const user = await User.findOne({ restId }).lean();
+    if (!user) {
+      return res.status(404).json({ success: false, message: "Restaurant user not found" });
+    }
+    if (user.currentSessionId && user.currentSessionId !== sessionId) {
+      return res.status(401).json({ 
+        success: false, 
+        code: "SESSION_EXPIRED", 
+        message: "Your account was logged in from another device." 
+      });
+    }
+    return res.status(200).json({ success: true, message: "Session valid" });
+  } catch (err) {
+    console.error("Verify session error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
