@@ -976,6 +976,7 @@ async function sendPushNotification(fcmToken, order) {
         channelId: 'order_notifications',
         sound: 'ordernotification',
         icon: 'notification_icon',
+        color: '#000000',
         priority: 'max',
         visibility: 'public'
       }
