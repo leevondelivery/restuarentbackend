@@ -1013,7 +1013,7 @@ async function sendPushNotification(fcmToken, order) {
       priority: 'high',
       notification: {
         channelId: 'order_notifications',
-        sound: 'default',
+        sound: 'ordernotification',
         priority: 'max',
         visibility: 'public'
       }
