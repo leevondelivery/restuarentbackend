@@ -12,25 +12,8 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Session Check Middleware to enforce single device login
+// Session Check Middleware - Allow multi-device access (e.g. owner and receptionist)
 const checkSession = async (req, res, next) => {
-  const sessionId = req.headers['x-session-id'] || req.body.sessionId || req.query.sessionId;
-  const restId = req.headers['x-rest-id'] || req.body.restId || req.body.restaurantId || req.params.restaurantId;
-
-  if (sessionId && restId) {
-    try {
-      const user = await User.findOne({ restId }).lean();
-      if (user && user.currentSessionId && user.currentSessionId !== sessionId) {
-        return res.status(401).json({ 
-          success: false, 
-          code: "SESSION_EXPIRED", 
-          message: "Logged in on another device" 
-        });
-      }
-    } catch (err) {
-      console.error("Session middleware error:", err.message);
-    }
-  }
   next();
 };
 
@@ -183,7 +166,7 @@ app.post('/signup', async (req, res) => {
   }
 });
 
-// Update FCM Token Endpoint (registers fcmToken on login, clears/deletes fcmToken on logout)
+// Update FCM Token Endpoint (registers fcmToken for order notification alerts)
 app.post('/update-fcm', async (req, res) => {
   const { restId, fcmToken } = req.body;
 
@@ -193,28 +176,6 @@ app.post('/update-fcm', async (req, res) => {
 
   try {
     const tokenValue = fcmToken || "";
-
-    // Check if an old FCM token exists for a different device before updating
-    const existingUser = await User.findOne({ restId: restId }).lean();
-    if (existingUser && existingUser.fcmToken && tokenValue && existingUser.fcmToken !== tokenValue) {
-      console.log(`Sending silent FORCE_LOGOUT notification to previous device FCM token for Restaurant: ${restId}`);
-      try {
-        const logoutPayload = {
-          token: existingUser.fcmToken,
-          data: {
-            action: 'FORCE_LOGOUT',
-            message: 'Your account was logged in from another device.'
-          },
-          android: {
-            priority: 'high'
-          }
-        };
-        await getMessaging().send(logoutPayload);
-        console.log("Silent FORCE_LOGOUT notification dispatched successfully.");
-      } catch (fcmErr) {
-        console.error("Error dispatching silent FORCE_LOGOUT notification:", fcmErr.message);
-      }
-    }
 
     // If fcmToken is null, undefined, or empty string, it clears/deletes the token in the DB
     const result = await User.findOneAndUpdate(
