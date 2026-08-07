@@ -101,27 +101,51 @@ try {
   } else {
     const fs = require('fs');
     const path = require('path');
-    const secretPaths = [
-      '/etc/secrets/serviceAccountKey.json',
-      path.join(__dirname, 'serviceAccountKey.json')
-    ];
     let initialized = false;
-    for (const secretPath of secretPaths) {
-      if (fs.existsSync(secretPath)) {
+
+    // 1. Scan Render secret files directory (/etc/secrets/)
+    if (fs.existsSync('/etc/secrets/')) {
+      try {
+        const files = fs.readdirSync('/etc/secrets/');
+        for (const file of files) {
+          const secretPath = path.join('/etc/secrets/', file);
+          try {
+            const fileData = fs.readFileSync(secretPath, 'utf8');
+            const parsed = parseFirebaseServiceAccount(fileData);
+            if (parsed && (parsed.project_id || parsed.type === 'service_account')) {
+              serviceAccount = parsed;
+              initializeApp({ credential: cert(serviceAccount) });
+              console.log(`Firebase Admin SDK initialized successfully via secret file at ${secretPath}`);
+              initialized = true;
+              break;
+            }
+          } catch (fileErr) {
+            console.error(`Error parsing secret file at ${secretPath}:`, fileErr.message);
+          }
+        }
+      } catch (dirErr) {
+        console.error("Error reading /etc/secrets directory:", dirErr.message);
+      }
+    }
+
+    // 2. Fallback to local serviceAccountKey.json
+    if (!initialized) {
+      const localPath = path.join(__dirname, 'serviceAccountKey.json');
+      if (fs.existsSync(localPath)) {
         try {
-          const fileData = fs.readFileSync(secretPath, 'utf8');
-          serviceAccount = JSON.parse(fileData);
-          initializeApp({
-            credential: cert(serviceAccount)
-          });
-          console.log(`Firebase Admin SDK initialized successfully via secret file at ${secretPath}`);
-          initialized = true;
-          break;
+          const fileData = fs.readFileSync(localPath, 'utf8');
+          serviceAccount = parseFirebaseServiceAccount(fileData);
+          if (serviceAccount) {
+            initializeApp({ credential: cert(serviceAccount) });
+            console.log(`Firebase Admin SDK initialized successfully via local file at ${localPath}`);
+            initialized = true;
+          }
         } catch (err) {
-          console.error(`Error reading service account file at ${secretPath}:`, err.message);
+          console.error(`Error reading local serviceAccountKey.json:`, err.message);
         }
       }
     }
+
     if (!initialized) {
       console.warn("Firebase credentials not found (checked FIREBASE_SERVICE_ACCOUNT, individual env vars, and secret files). Push notifications will not function.");
     }
