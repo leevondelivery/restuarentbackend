@@ -24,38 +24,48 @@ function parseFirebaseServiceAccount(rawInput) {
   let inputStr = String(rawInput).trim();
   if (!inputStr) return null;
 
+  // Remove surrounding quotes if double quoted
+  if ((inputStr.startsWith('"') && inputStr.endsWith('"')) || (inputStr.startsWith("'") && inputStr.endsWith("'"))) {
+    inputStr = inputStr.slice(1, -1).trim();
+  }
+
   // 1. If base64 encoded string, decode first
   if (!inputStr.startsWith('{')) {
     try {
-      const decoded = Buffer.from(inputStr, 'base64').toString('utf8');
-      if (decoded.trim().startsWith('{')) {
-        inputStr = decoded.trim();
+      const decoded = Buffer.from(inputStr, 'base64').toString('utf8').trim();
+      if (decoded.startsWith('{')) {
+        inputStr = decoded;
       }
     } catch (e) { }
   }
 
   // 2. Direct JSON.parse
   try {
-    return JSON.parse(inputStr);
+    const parsed = JSON.parse(inputStr);
+    if (parsed && typeof parsed === 'object') return parsed;
   } catch (e) { }
 
   // 3. Fix unescaped control newlines/tabs inside JSON string literals
   try {
     const cleaned = inputStr
-      .replace(/^["']|["']$/g, '')
-      .replace(/\r\n/g, '\\n')
-      .replace(/\n/g, '\\n')
-      .replace(/\r/g, '\\r')
+      .replace(/\\"/g, '"')
+      .replace(/\\n/g, '\n')
+      .replace(/[\r\n]+/g, '\\n')
       .replace(/\t/g, '\\t');
-    return JSON.parse(cleaned);
+    const parsed = JSON.parse(cleaned);
+    if (parsed && typeof parsed === 'object') return parsed;
   } catch (e) { }
 
-  // 4. Fix escaped string literals
+  // 4. Substring extraction between { and }
   try {
-    const cleaned2 = inputStr
-      .replace(/\\\\n/g, '\\n')
-      .replace(/\\"/g, '"');
-    return JSON.parse(cleaned2);
+    const startIdx = inputStr.indexOf('{');
+    const endIdx = inputStr.lastIndexOf('}');
+    if (startIdx !== -1 && endIdx > startIdx) {
+      let subStr = inputStr.substring(startIdx, endIdx + 1);
+      subStr = subStr.replace(/[\r\n]+/g, '\\n');
+      const parsed = JSON.parse(subStr);
+      if (parsed && typeof parsed === 'object') return parsed;
+    }
   } catch (e) { }
 
   return null;
