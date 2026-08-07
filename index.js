@@ -17,45 +17,60 @@ const checkSession = async (req, res, next) => {
   next();
 };
 
-// Initialize Firebase Admin dynamically
-try {
-  let serviceAccount = null;
-  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+function parseFirebaseServiceAccount(rawInput) {
+  if (!rawInput) return null;
+  if (typeof rawInput === 'object') return rawInput;
+
+  let inputStr = String(rawInput).trim();
+  if (!inputStr) return null;
+
+  // 1. If base64 encoded string, decode first
+  if (!inputStr.startsWith('{')) {
     try {
-      let rawSA = typeof process.env.FIREBASE_SERVICE_ACCOUNT === 'string'
-        ? process.env.FIREBASE_SERVICE_ACCOUNT.trim()
-        : process.env.FIREBASE_SERVICE_ACCOUNT;
-
-      if (typeof rawSA === 'string') {
-        if (!rawSA.startsWith('{')) {
-          rawSA = Buffer.from(rawSA, 'base64').toString('utf8');
-        }
-        serviceAccount = JSON.parse(rawSA);
-      } else {
-        serviceAccount = rawSA;
+      const decoded = Buffer.from(inputStr, 'base64').toString('utf8');
+      if (decoded.trim().startsWith('{')) {
+        inputStr = decoded.trim();
       }
-    } catch (parseErr) {
-      console.warn("Direct JSON.parse for FIREBASE_SERVICE_ACCOUNT failed, cleaning string:", parseErr.message);
-      try {
-        let cleaned = String(process.env.FIREBASE_SERVICE_ACCOUNT)
-          .trim()
-          .replace(/^["']|["']$/g, '')
-          .replace(/\\n/g, '\n');
-        serviceAccount = JSON.parse(cleaned);
-      } catch (err2) {
-        console.error("Could not parse FIREBASE_SERVICE_ACCOUNT JSON:", err2.message);
-      }
-    }
-
-    if (serviceAccount) {
-      initializeApp({
-        credential: cert(serviceAccount)
-      });
-      console.log("Firebase Admin SDK initialized successfully via FIREBASE_SERVICE_ACCOUNT");
-    }
+    } catch (e) { }
   }
 
-  if (!serviceAccount && process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && (process.env.FIREBASE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY_BASE64)) {
+  // 2. Direct JSON.parse
+  try {
+    return JSON.parse(inputStr);
+  } catch (e) { }
+
+  // 3. Fix unescaped control newlines/tabs inside JSON string literals
+  try {
+    const cleaned = inputStr
+      .replace(/^["']|["']$/g, '')
+      .replace(/\r\n/g, '\\n')
+      .replace(/\n/g, '\\n')
+      .replace(/\r/g, '\\r')
+      .replace(/\t/g, '\\t');
+    return JSON.parse(cleaned);
+  } catch (e) { }
+
+  // 4. Fix escaped string literals
+  try {
+    const cleaned2 = inputStr
+      .replace(/\\\\n/g, '\\n')
+      .replace(/\\"/g, '"');
+    return JSON.parse(cleaned2);
+  } catch (e) { }
+
+  return null;
+}
+
+// Initialize Firebase Admin dynamically
+try {
+  let serviceAccount = parseFirebaseServiceAccount(process.env.FIREBASE_SERVICE_ACCOUNT);
+
+  if (serviceAccount) {
+    initializeApp({
+      credential: cert(serviceAccount)
+    });
+    console.log("Firebase Admin SDK initialized successfully via FIREBASE_SERVICE_ACCOUNT environment variable.");
+  } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && (process.env.FIREBASE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY_BASE64)) {
     let privateKey;
     if (process.env.FIREBASE_PRIVATE_KEY_BASE64) {
       privateKey = Buffer.from(process.env.FIREBASE_PRIVATE_KEY_BASE64, 'base64').toString('utf8');
@@ -72,19 +87,33 @@ try {
         privateKey: privateKey,
       })
     });
-    console.log("Firebase Admin SDK initialized successfully via individual environment variables");
-  } else if (!serviceAccount) {
+    console.log("Firebase Admin SDK initialized successfully via individual environment variables.");
+  } else {
     const fs = require('fs');
     const path = require('path');
-    const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
-    if (fs.existsSync(serviceAccountPath)) {
-      serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
-      initializeApp({
-        credential: cert(serviceAccount)
-      });
-      console.log("Firebase Admin SDK initialized successfully via serviceAccountKey.json");
-    } else {
-      console.warn("Firebase credentials not found. Push notifications will not function in production.");
+    const secretPaths = [
+      '/etc/secrets/serviceAccountKey.json',
+      path.join(__dirname, 'serviceAccountKey.json')
+    ];
+    let initialized = false;
+    for (const secretPath of secretPaths) {
+      if (fs.existsSync(secretPath)) {
+        try {
+          const fileData = fs.readFileSync(secretPath, 'utf8');
+          serviceAccount = JSON.parse(fileData);
+          initializeApp({
+            credential: cert(serviceAccount)
+          });
+          console.log(`Firebase Admin SDK initialized successfully via secret file at ${secretPath}`);
+          initialized = true;
+          break;
+        } catch (err) {
+          console.error(`Error reading service account file at ${secretPath}:`, err.message);
+        }
+      }
+    }
+    if (!initialized) {
+      console.warn("Firebase credentials not found (checked FIREBASE_SERVICE_ACCOUNT, individual env vars, and secret files). Push notifications will not function.");
     }
   }
 } catch (error) {
