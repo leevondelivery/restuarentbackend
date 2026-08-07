@@ -22,7 +22,7 @@ function parseFirebaseServiceAccount(rawInput) {
   if (typeof rawInput === 'object') return rawInput;
 
   let inputStr = String(rawInput).trim();
-  if (!inputStr) return null;
+  if (!inputStr || inputStr === 'undefined' || inputStr === 'null') return null;
 
   // Remove surrounding quotes if double quoted
   if ((inputStr.startsWith('"') && inputStr.endsWith('"')) || (inputStr.startsWith("'") && inputStr.endsWith("'"))) {
@@ -56,7 +56,16 @@ function parseFirebaseServiceAccount(rawInput) {
     if (parsed && typeof parsed === 'object') return parsed;
   } catch (e) { }
 
-  // 4. Substring extraction between { and }
+  // 4. Handle escaped backslashes scenarios
+  try {
+    const cleaned2 = inputStr
+      .replace(/\\\\n/g, '\\n')
+      .replace(/\\"/g, '"');
+    const parsed = JSON.parse(cleaned2);
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch (e) { }
+
+  // 5. Substring extraction between { and }
   try {
     const startIdx = inputStr.indexOf('{');
     const endIdx = inputStr.lastIndexOf('}');
@@ -73,13 +82,14 @@ function parseFirebaseServiceAccount(rawInput) {
 
 // Initialize Firebase Admin dynamically
 try {
-  let serviceAccount = parseFirebaseServiceAccount(process.env.FIREBASE_SERVICE_ACCOUNT);
+  const envKey = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.FIREBASE_SERVICE_ACCOUNT_KEY || process.env.FIREBASE_KEY || process.env.FIREBASE_JSON;
+  let serviceAccount = parseFirebaseServiceAccount(envKey);
 
   if (serviceAccount) {
     initializeApp({
       credential: cert(serviceAccount)
     });
-    console.log("Firebase Admin SDK initialized successfully via FIREBASE_SERVICE_ACCOUNT environment variable.");
+    console.log("Firebase Admin SDK initialized successfully via Environment Variable.");
   } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && (process.env.FIREBASE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY_BASE64)) {
     let privateKey;
     if (process.env.FIREBASE_PRIVATE_KEY_BASE64) {
