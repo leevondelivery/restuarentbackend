@@ -19,17 +19,52 @@ const checkSession = async (req, res, next) => {
 
 // Initialize Firebase Admin dynamically
 try {
-  let serviceAccount;
+  let serviceAccount = null;
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    initializeApp({
-      credential: cert(serviceAccount)
-    });
-    console.log("Firebase Admin SDK initialized successfully via FIREBASE_SERVICE_ACCOUNT");
-  } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
-    const privateKey = process.env.FIREBASE_PRIVATE_KEY
-      .replace(/^"|"$/g, '')
-      .replace(/\\n/g, '\n');
+    try {
+      let rawSA = typeof process.env.FIREBASE_SERVICE_ACCOUNT === 'string'
+        ? process.env.FIREBASE_SERVICE_ACCOUNT.trim()
+        : process.env.FIREBASE_SERVICE_ACCOUNT;
+
+      if (typeof rawSA === 'string') {
+        if (!rawSA.startsWith('{')) {
+          rawSA = Buffer.from(rawSA, 'base64').toString('utf8');
+        }
+        serviceAccount = JSON.parse(rawSA);
+      } else {
+        serviceAccount = rawSA;
+      }
+    } catch (parseErr) {
+      console.warn("Direct JSON.parse for FIREBASE_SERVICE_ACCOUNT failed, cleaning string:", parseErr.message);
+      try {
+        let cleaned = String(process.env.FIREBASE_SERVICE_ACCOUNT)
+          .trim()
+          .replace(/^["']|["']$/g, '')
+          .replace(/\\n/g, '\n');
+        serviceAccount = JSON.parse(cleaned);
+      } catch (err2) {
+        console.error("Could not parse FIREBASE_SERVICE_ACCOUNT JSON:", err2.message);
+      }
+    }
+
+    if (serviceAccount) {
+      initializeApp({
+        credential: cert(serviceAccount)
+      });
+      console.log("Firebase Admin SDK initialized successfully via FIREBASE_SERVICE_ACCOUNT");
+    }
+  }
+
+  if (!serviceAccount && process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && (process.env.FIREBASE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY_BASE64)) {
+    let privateKey;
+    if (process.env.FIREBASE_PRIVATE_KEY_BASE64) {
+      privateKey = Buffer.from(process.env.FIREBASE_PRIVATE_KEY_BASE64, 'base64').toString('utf8');
+    } else {
+      privateKey = process.env.FIREBASE_PRIVATE_KEY
+        .trim()
+        .replace(/^"|"$/g, '')
+        .replace(/\\n/g, '\n');
+    }
     initializeApp({
       credential: cert({
         projectId: process.env.FIREBASE_PROJECT_ID,
@@ -38,7 +73,7 @@ try {
       })
     });
     console.log("Firebase Admin SDK initialized successfully via individual environment variables");
-  } else {
+  } else if (!serviceAccount) {
     const fs = require('fs');
     const path = require('path');
     const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
@@ -183,16 +218,20 @@ app.post('/update-fcm', async (req, res) => {
   try {
     const tokenValue = fcmToken || "";
 
-    // Flexible query matching both String and Number types across restId, restaurantId, and _id
-    const query = {
-      $or: [
-        { restId: String(restId) },
-        { restId: Number(restId) },
-        { restaurantId: String(restId) },
-        { restaurantId: Number(restId) },
-        { _id: String(restId) }
-      ]
-    };
+    // Flexible query matching String and Number types across restId and restaurantId safely without BSON casting errors
+    const orConditions = [
+      { restId: String(restId) },
+      { restId: Number(restId) },
+      { restaurantId: String(restId) },
+      { restaurantId: Number(restId) }
+    ];
+
+    // Only add _id if restId is a valid 24-char ObjectId hex string
+    if (mongoose.Types.ObjectId.isValid(restId)) {
+      orConditions.push({ _id: new mongoose.Types.ObjectId(restId) });
+    }
+
+    const query = { $or: orConditions };
 
     const result = await User.findOneAndUpdate(
       query,
@@ -982,15 +1021,19 @@ async function processOrderNotification(newOrder) {
   if (!targetRestaurantId) return;
 
   try {
-    // Find the restaurant in 'restuarentusers' using flexible $or query matching both String and Number types
-    const restaurant = await User.findOne({
-      $or: [
-        { restId: String(targetRestaurantId) },
-        { restId: Number(targetRestaurantId) },
-        { restaurantId: String(targetRestaurantId) },
-        { restaurantId: Number(targetRestaurantId) }
-      ]
-    });
+    // Find the restaurant in 'restuarentusers' using flexible $or query matching both String and Number types safely
+    const orConditions = [
+      { restId: String(targetRestaurantId) },
+      { restId: Number(targetRestaurantId) },
+      { restaurantId: String(targetRestaurantId) },
+      { restaurantId: Number(targetRestaurantId) }
+    ];
+
+    if (mongoose.Types.ObjectId.isValid(targetRestaurantId)) {
+      orConditions.push({ _id: new mongoose.Types.ObjectId(targetRestaurantId) });
+    }
+
+    const restaurant = await User.findOne({ $or: orConditions });
 
     if (restaurant && restaurant.fcmToken) {
       console.log(`Found Restaurant: ${restaurant.email} (ID: ${targetRestaurantId}), dispatching notification...`);
