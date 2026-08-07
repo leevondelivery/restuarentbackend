@@ -174,25 +174,42 @@ app.post('/update-fcm', async (req, res) => {
     return res.status(400).json({ success: false, message: "restId is required" });
   }
 
+  // Prevent saving error strings as tokens
+  if (fcmToken && (typeof fcmToken !== 'string' || fcmToken.startsWith('FCM_ERR') || fcmToken.includes('NOT_FETCHED'))) {
+    console.warn(`[FCM-SYNC] Refusing to store error string as fcmToken for restId: ${restId}`);
+    return res.status(400).json({ success: false, message: "Invalid FCM token format" });
+  }
+
   try {
     const tokenValue = fcmToken || "";
 
-    // If fcmToken is null, undefined, or empty string, it clears/deletes the token in the DB
+    // Flexible query matching both String and Number types across restId, restaurantId, and _id
+    const query = {
+      $or: [
+        { restId: String(restId) },
+        { restId: Number(restId) },
+        { restaurantId: String(restId) },
+        { restaurantId: Number(restId) },
+        { _id: String(restId) }
+      ]
+    };
+
     const result = await User.findOneAndUpdate(
-      { restId: restId },
+      query,
       { $set: { fcmToken: tokenValue } },
       { returnDocument: 'after' }
     );
 
     if (!result) {
+      console.error(`[FCM-SYNC] Restaurant user not found in DB for query restId: ${restId}`);
       return res.status(404).json({ success: false, message: "Restaurant user not found" });
     }
 
-    console.log(`FCM token successfully ${tokenValue ? 'registered' : 'cleared'} for Restaurant: ${restId}`);
+    console.log(`✅ FCM token successfully ${tokenValue ? 'registered' : 'cleared'} in MongoDB for Restaurant: ${restId}`);
     return res.status(200).json({ 
       success: true, 
       message: `FCM token successfully ${tokenValue ? 'registered' : 'cleared'}`,
-      data: { restId: result.restId, hasToken: !!result.fcmToken }
+      data: { restId: result.restId || restId, hasToken: !!result.fcmToken }
     });
   } catch (err) {
     console.error("Error updating FCM token:", err);
@@ -920,6 +937,8 @@ app.post('/accept-order', async (req, res) => {
   }
 });
 
+let isPollingActive = false;
+
 // Order Stream Listener to automatically trigger push notifications
 function startOrderListener() {
   const db = mongoose.connection.db;
@@ -935,27 +954,93 @@ function startOrderListener() {
 
     changeStream.on('change', async (change) => {
       const newOrder = change.fullDocument;
-      console.log("🔥 NEW ORDER DETECTED:", newOrder.orderId || newOrder._id);
-
-      const targetRestaurantId = newOrder.restaurantId;
-      if (targetRestaurantId) {
-        // Find the restaurant in 'restuarentusers' to get its fcmToken
-        const restaurant = await User.findOne({ restId: targetRestaurantId });
-        if (restaurant && restaurant.fcmToken) {
-          console.log(`Found Restaurant: ${restaurant.email} (ID: ${targetRestaurantId}), dispatching notification...`);
-          await sendPushNotification(restaurant.fcmToken, newOrder);
-        } else {
-          console.log(`No registered fcmToken found for Restaurant ID: ${targetRestaurantId}`);
-        }
-      }
+      console.log("🔥 NEW ORDER DETECTED via ChangeStream:", newOrder.orderId || newOrder._id);
+      await processOrderNotification(newOrder);
     });
 
     changeStream.on('error', (err) => {
       console.error("Order change stream listener error:", err.message || err);
+      if (changeStream) {
+        changeStream.close().catch(() => { });
+      }
+      if (!isPollingActive) {
+        isPollingActive = true;
+        setupPollingFallback();
+      }
     });
   } catch (error) {
     console.error("Failed to start MongoDB change stream watch:", error.message || error);
+    if (!isPollingActive) {
+      isPollingActive = true;
+      setupPollingFallback();
+    }
   }
+}
+
+async function processOrderNotification(newOrder) {
+  const targetRestaurantId = newOrder.restaurantId;
+  if (!targetRestaurantId) return;
+
+  try {
+    // Find the restaurant in 'restuarentusers' using flexible $or query matching both String and Number types
+    const restaurant = await User.findOne({
+      $or: [
+        { restId: String(targetRestaurantId) },
+        { restId: Number(targetRestaurantId) },
+        { restaurantId: String(targetRestaurantId) },
+        { restaurantId: Number(targetRestaurantId) }
+      ]
+    });
+
+    if (restaurant && restaurant.fcmToken) {
+      console.log(`Found Restaurant: ${restaurant.email} (ID: ${targetRestaurantId}), dispatching notification...`);
+      await sendPushNotification(restaurant.fcmToken, newOrder);
+    } else {
+      console.log(`No registered fcmToken found for Restaurant ID: ${targetRestaurantId}`);
+    }
+  } catch (err) {
+    console.error("Error processing order notification:", err);
+  }
+}
+
+// Fallback polling for MongoDB instances without replica set configured
+function setupPollingFallback() {
+  console.log("Setting up database polling fallback for orders (every 10 seconds)...");
+  const db = mongoose.connection.db;
+  const collection = db.collection('orders');
+
+  let knownOrderIds = new Set();
+  let isFirstLoad = true;
+
+  const poll = async () => {
+    try {
+      const orders = await collection.find({}).toArray();
+      const currentOrderIds = new Set(orders.map(o => String(o.orderId || o._id)));
+
+      if (isFirstLoad) {
+        knownOrderIds = currentOrderIds;
+        isFirstLoad = false;
+        console.log(`Order polling initialized with ${knownOrderIds.size} existing orders.`);
+        return;
+      }
+
+      // Check for new orders
+      for (const order of orders) {
+        const idKey = String(order.orderId || order._id);
+        if (!knownOrderIds.has(idKey)) {
+          console.log("🔥 NEW ORDER DETECTED via Polling:", idKey);
+          await processOrderNotification(order);
+        }
+      }
+
+      knownOrderIds = currentOrderIds;
+    } catch (error) {
+      console.error("Order polling error:", error);
+    }
+  };
+
+  // Run poll every 10 seconds
+  setInterval(poll, 10000);
 }
 
 // Helper function to send Firebase notification
